@@ -40,16 +40,15 @@ try {
     cl::Kernel addKernel = GH.build_kernel(addKernelSource, "add");
 
     std::vector<int> input(N);
-    std::vector<int> temp(N);
     std::vector<int> output(N);
     std::iota(input.begin(), input.end(), 0);
 
     // intermediate result, should stay on the GPU ...
-    auto buffer = GH.allocate(temp);
+    auto buffer = GH.allocate(N*sizeof(int));
 
     int factor = {2};
     int term = {1};
-    
+
     GH.run<int>(mulKernel, cl::NDRange{N}, cl::NDRange{64},
                 buffer, std::cref(input), factor);
     GH.run<int>(addKernel,  cl::NDRange{N}, cl::NDRange{64},
