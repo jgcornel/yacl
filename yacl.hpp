@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -8,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #define __CL_ENABLE_EXCEPTIONS
@@ -17,13 +19,12 @@ namespace jc {
 
 namespace detail {
 
-bool equal(const std::string & s1, const std::string & s2)
+bool equal_strings(const std::string & s1, const std::string & s2)
 {
     const std::string & kort = s1.size() < s2.size() ? s1 : s2;
     const std::string & lang = s1.size() < s2.size() ? s2 : s1;
 
-    auto i = std::mismatch(kort.cbegin(), kort.cend(), lang.cbegin());
-    return i.first == kort.cend() || i.second == lang.cend();
+    return std::equal(kort.cbegin(), kort.cend(), lang.cbegin());
 }
 
 template <typename Predicate>
@@ -59,7 +60,7 @@ struct DeviceCalled {
     {
         std::string n;
         device.getInfo(CL_DEVICE_NAME, &n);
-        return equal(name, n);
+        return equal_strings(name, n);
     }
 };
 
@@ -177,6 +178,11 @@ const std::map<cl_int, const char *> error_codes =
 
 } // namespace jc::detail
 
+///
+/// readable_error : cl_int -> const char *
+///
+/// Given an OpenCL error code, return a human readable C string.
+///
 const char * readable_error(cl_int e)
 {
     if (detail::error_codes.count(e) == 0) 
@@ -184,7 +190,12 @@ const char * readable_error(cl_int e)
 
     return detail::error_codes.at(e);
 }
-
+///
+/// best_fit : size_t -> size_t -> size_t
+///
+/// Given a size global and a size local, return the smallest number that is
+/// greater than or equal to global and that is a multiple of local.
+///
 size_t best_fit(size_t global, size_t local)
 {
     size_t times = global/local;
@@ -192,86 +203,219 @@ size_t best_fit(size_t global, size_t local)
     return times*local;
 }
 
-template <typename U>
-struct GpuResult {
-    GpuResult(cl::Buffer & gm, std::vector<U>& cm) 
-        : gpu_memory{gm}
-        , cpu_memory{cm}
-    {}
-
-    cl::Buffer & gpu_memory;
-    std::vector<U> & cpu_memory;
-};
-
+template <typename U> using MemPair = std::pair<cl::Buffer, std::vector<U>&>;
+///
+/// GpuHandle.
+/// 
+/// A wrapper class to ease the burden of writing OpenCL host code.
+///
 class GpuHandle {
 public:
+    // Constructor 
+    //
+    // Given an OpenCL device name try to initialize an OpenCL device,
+    // context and command queue. Throw an error if no appropriate device
+    // can be found.
+    //
+    GpuHandle(const std::string & name)
+        : device_{jc::detail::get_device(jc::detail::DeviceCalled{name})}
+        , context_{cl::Context{device_}}
+        , queue_{cl::CommandQueue{context_, device_, CL_QUEUE_PROFILING_ENABLE}}
+    {}
 
+    // Constructor 
+    //
+    // Given an OpenCL device type try to initialize an OpenCL device,
+    // context and command queue. Throw an error if no appropriate device
+    // can be found.
+    //
+    GpuHandle(cl_device_info type)
+        : device_{jc::detail::get_device(jc::detail::DeviceOfType{type})}
+        , context_{cl::Context{device_}}
+        , queue_{cl::CommandQueue{context_, device_, CL_QUEUE_PROFILING_ENABLE}}
+    {}
+
+    // build_kernel
+    //
+    // Given a string and a kernel name, try to compile the string as OpenCL
+    // code and extract a kernel with the given name. Throw an error if the
+    // OpenCL code cannot be compiled or no kernel with the given name is
+    // contained in the OpenCL code.
+    //
+    cl::Kernel build_kernel(const std::string & source, const char * name)
+    {
+        cl::Program program = 
+            jc::detail::buildProgramFromSource(source, context_, device_);
+        return cl::Kernel{program, name};
+    }
+
+
+    // build_kernel_from_file
+    //
+    // Given a file name and a kernel name, try to open the corresponding
+    // file, compile the OpenCL code it contains and extract a kernel 
+    // with the given name. Throw an error if the file cannot be opened,
+    // the OpenCL code cannot be compiled or no kernel with the given name
+    // is contained in the OpenCL code.
+    //
+    cl::Kernel build_kernel_from_file(
+        const std::string & file, 
+        const char * name
+        )
+    {
+        cl::Program program = 
+            jc::detail::buildProgramFromSourceFile(file, context_, device_);
+        return cl::Kernel{program, name};
+    }
+
+    // allocate
+    //
+    // Given a byte size and an optional memory flag, a cl::Buffer of the
+    // appropriate size is created and returned.
+    //
+    cl::Buffer allocate(size_t bytes, cl_mem_flags flags=CL_MEM_READ_WRITE)
+    {
+        cl::Buffer buffer{context_, flags, bytes};
+        return buffer;
+    }
+
+    // template <typename U> allocate
+    //
+    // Given an std::vector<U> and an optional memory flag, a cl::Buffer of 
+    // the appropriate size is created and returned.
+    //
     template <typename U>
-    struct Memory {
-        cl::Buffer buffer_;
-        std::vector<U> & vector_;
-    };
+    cl::Buffer allocate(
+        const std::vector<U>& vector, 
+        cl_mem_flags flags=CL_MEM_READ_WRITE
+        )
+    {
+        return allocate(sizeof(U)*vector.size(), flags);
+    }
 
-    GpuHandle(const std::string &);
-    GpuHandle(cl_device_info );
+    // template <typename U> copy
+    //
+    // Given an std::vector<U>, a cl::Buffer and an optional blocking 
+    // indicator, copy the contents of the vector to the buffer. This boils 
+    // down to writing from the OpenCL host to the OpenCL device.
+    //
+    template <typename U>
+    void copy(
+        const std::vector<U>& vector, 
+        cl::Buffer& buffer, 
+        cl_bool blocking=CL_TRUE
+        )
+    {
+        size_t bytes = sizeof(U)*vector.size();
+        queue_.enqueueWriteBuffer(buffer, blocking, 0, bytes, vector.data());
+    }
 
-    cl::Kernel build_kernel_from_file(const std::string & , const char*);
-    cl::Kernel build_kernel(const std::string & , const char*);
+    // template <typename U> copy
+    //
+    // Given a cl::Buffer, an std::vector<U> and an optional blocking 
+    // indicator, copy the contents of the buffer to the vector. This boils 
+    // down to writing from the OpenCL device to the OpenCL host.
+    //
+    template <typename U>
+    void copy(
+        const cl::Buffer & buffer,
+        std::vector<U>& vector,
+        cl_bool blocking=CL_TRUE
+        )
+    {
+        size_t bytes = sizeof(U)*vector.size();
+        queue_.enqueueReadBuffer(buffer, blocking, 0, bytes, vector.data());
+    }
 
-
+    // template <typename U, typename T, typename... Ts> run
+    //
+    // Given a kernel, a global NDRange, a local NDRange and a variable non
+    // zero number of arguments, try to run the kernel with the given global
+    // and local NDRanges and using the variable number of arguments as the
+    // kernel's arguments. 
+    //
+    // Primitive types like int, float, ... and cl::Buffer types are simply
+    // forwarded to the kernel's setArg method taking their position in the
+    // argument's list into account. Special treatment is foreseen for
+    // std::reference_wrapper<const std::vector<T>> and
+    // std::reference_wrapper<std::vector<T>> types. Both are assumed to 
+    // match a __global T * or __constant T * argument, but the former is
+    // assumed to be input and the latter as output. For input an appropriate
+    // cl::Buffer is created that is populated with the data from the vector
+    // and forwarded to the kernel's setArg method. For output an appropriate
+    // cl::Buffer is created and forwarded to the kernel's setArg method.
+    // When the kernel has finished, the buffer's contents is transferred to
+    // the vector.
+    // 
+    // Note: it is necessary to use the std::cref and std::ref functions to
+    // create the appropriate std::reference_wrapper object.
+    //
+    // Note: all vectors related to output must be of the same type U!
+    //
     template <typename U, typename T, typename... Ts>
-    void run(cl::Kernel, cl::NDRange, cl::NDRange, T, Ts...);
+    void run(
+        cl::Kernel kernel, 
+        cl::NDRange global,
+        cl::NDRange local,
+        T car,
+        Ts... cdr
+        )
+    {
+        std::vector<MemPair<U>> results;
+        return run_helper(results, kernel, global, local, 0, car, cdr...);
+    }
 
 private:
     cl::Device device_;
     cl::Context context_;
     cl::CommandQueue queue_;
 
-    //void run_helper(cl::Kernel, cl::NDRange, cl::NDRange, int);
     template <typename U>
-    void run_helper(std::vector<GpuResult<U>>&, cl::Kernel, cl::NDRange, cl::NDRange, int);
+    void run_helper(
+        std::vector<MemPair<U>>&, 
+        cl::Kernel, 
+        cl::NDRange, 
+        cl::NDRange, 
+        int
+        );
 
     template <typename U, typename T, typename... Ts>
-    void run_helper(std::vector<GpuResult<U>>&, cl::Kernel, cl::NDRange, cl::NDRange, int, T, Ts...);
+    void run_helper(
+        std::vector<MemPair<U>>&, 
+        cl::Kernel, 
+        cl::NDRange, 
+        cl::NDRange, 
+        int, 
+        T, 
+        Ts...
+        );
+
+    template <typename U, typename... Ts>
+    void run_helper(
+        std::vector<MemPair<U>>&, 
+        cl::Kernel, 
+        cl::NDRange, 
+        cl::NDRange, 
+        int, 
+        std::reference_wrapper<std::vector<U>>,
+        Ts...);
 
     template <typename U, typename T, typename... Ts>
-    void run_helper(std::vector<GpuResult<U>>&, cl::Kernel, cl::NDRange, cl::NDRange, int, std::reference_wrapper<std::vector<T>>, Ts...);
+    void run_helper(
+        std::vector<MemPair<U>>&, 
+        cl::Kernel, 
+        cl::NDRange, 
+        cl::NDRange, 
+        int, 
+        std::reference_wrapper<const std::vector<T>>, 
+        Ts...);
 
-    template <typename U, typename T, typename... Ts>
-    void run_helper(std::vector<GpuResult<U>>&, cl::Kernel, cl::NDRange, cl::NDRange, int, std::reference_wrapper<const std::vector<T>>, Ts...);
 };
 } // namespace jc
 
-jc::GpuHandle::GpuHandle(const std::string & name) 
-    : device_{jc::detail::get_device(jc::detail::DeviceCalled{name})}
-    , context_{cl::Context{device_}}
-    , queue_{cl::CommandQueue{context_, device_, CL_QUEUE_PROFILING_ENABLE}}
-{}
-
-jc::GpuHandle::GpuHandle(cl_device_info type)
-    : device_{jc::detail::get_device(jc::detail::DeviceOfType{type})}
-    , context_{cl::Context{device_}}
-    , queue_{cl::CommandQueue{context_, device_, CL_QUEUE_PROFILING_ENABLE}}
-{
-}
-
-cl::Kernel jc::GpuHandle::build_kernel(const std::string & source, const char* name)
-{
-    cl::Program program = jc::detail::buildProgramFromSource(source, context_, device_);
-    return cl::Kernel{program, name};
-}
-
-cl::Kernel jc::GpuHandle::build_kernel_from_file(const std::string & file, const char* name)
-{
-    cl::Program program = jc::detail::buildProgramFromSourceFile(file, context_, device_);
-    return cl::Kernel{program, name};
-}
-
-/* TMP is fun */
-
 template <typename U>
 void jc::GpuHandle::run_helper(
-    std::vector<GpuResult<U>>& results,
+    std::vector<MemPair<U>>& results,
     cl::Kernel kernel, 
     cl::NDRange global, 
     cl::NDRange local, 
@@ -281,15 +425,15 @@ void jc::GpuHandle::run_helper(
     queue_.enqueueNDRangeKernel(kernel, cl::NullRange, global, local);
     while (!results.empty()) {
         auto result = results.back();
-        size_t bytes = result.cpu_memory.size() * sizeof(U);
-        queue_.enqueueReadBuffer(result.gpu_memory, CL_TRUE, 0, bytes, result.cpu_memory.data());
+        size_t bytes = result.second.size() * sizeof(U);
+        queue_.enqueueReadBuffer(result.first, CL_TRUE, 0, bytes, result.second.data());
         results.pop_back();
     }
 }
 
 template <typename U, typename T, typename... Ts>
 void jc::GpuHandle::run_helper(
-    std::vector<GpuResult<U>>& results,
+    std::vector<MemPair<U>>& results,
     cl::Kernel kernel, 
     cl::NDRange global, 
     cl::NDRange local, 
@@ -302,18 +446,18 @@ void jc::GpuHandle::run_helper(
     return run_helper(results, kernel, global, local, num+1, cdr...);
 }
 
-template <typename U, typename T, typename... Ts>
+template <typename U, typename... Ts>
 void jc::GpuHandle::run_helper(
-    std::vector<GpuResult<U>>& results,
+    std::vector<MemPair<U>>& results,
     cl::Kernel kernel, 
     cl::NDRange global, 
     cl::NDRange local, 
     int num,
-    std::reference_wrapper<std::vector<T>> car,
+    std::reference_wrapper<std::vector<U>> car,
     Ts... cdr
     )
 {
-    cl::Buffer buffer{context_, CL_MEM_READ_WRITE, car.get().size()*sizeof(T)};
+    cl::Buffer buffer{context_, CL_MEM_READ_WRITE, car.get().size()*sizeof(U)};
     results.emplace_back(buffer, car.get());
     kernel.setArg(num, buffer);
     return run_helper(results, kernel, global, local, num+1, cdr...);
@@ -321,7 +465,7 @@ void jc::GpuHandle::run_helper(
 
 template <typename U, typename T, typename... Ts>
 void jc::GpuHandle::run_helper(
-    std::vector<GpuResult<U>>& results,
+    std::vector<MemPair<U>>& results,
     cl::Kernel kernel, 
     cl::NDRange global, 
     cl::NDRange local, 
@@ -335,17 +479,4 @@ void jc::GpuHandle::run_helper(
     queue_.enqueueWriteBuffer(buffer, CL_TRUE, 0, bytes, car.get().data());
     kernel.setArg(num, buffer);
     return run_helper(results, kernel, global, local, num+1, cdr...);
-}
-
-template <typename U, typename T, typename... Ts>
-void jc::GpuHandle::run(
-    cl::Kernel kernel, 
-    cl::NDRange global, 
-    cl::NDRange local, 
-    T car, 
-    Ts... cdr
-    )
-{
-    std::vector<GpuResult<U>> results;
-    return run_helper(results, kernel, global, local, 0, car, cdr...);
 }
