@@ -178,11 +178,10 @@ const std::map<cl_int, const char *> error_codes =
 
 } // namespace jc::detail
 
-///
-/// readable_error : cl_int -> const char *
-///
-/// Given an OpenCL error code, return a human readable C string.
-///
+// readable_error
+//
+// Given an OpenCL error code, return a human readable C string.
+//
 const char * readable_error(cl_int e)
 {
     if (detail::error_codes.count(e) == 0)
@@ -190,12 +189,12 @@ const char * readable_error(cl_int e)
 
     return detail::error_codes.at(e);
 }
-///
-/// best_fit : size_t -> size_t -> size_t
-///
-/// Given a size global and a size local, return the smallest number that is
-/// greater than or equal to global and that is a multiple of local.
-///
+
+// best_fit
+//
+// Given a size global and a size local, return the smallest number that is
+// greater than or equal to global and that is a multiple of local.
+//
 size_t best_fit(size_t global, size_t local)
 {
     size_t times = global/local;
@@ -204,11 +203,11 @@ size_t best_fit(size_t global, size_t local)
 }
 
 template <typename U> using MemPair = std::pair<cl::Buffer, std::vector<U>&>;
-///
-/// GpuHandle.
-///
-/// A wrapper class to ease the burden of writing OpenCL host code.
-///
+
+// GpuHandle.
+//
+// A wrapper class to ease the burden of writing OpenCL host code.
+//
 class GpuHandle {
 public:
     // Constructor
