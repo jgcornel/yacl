@@ -67,13 +67,14 @@ struct DeviceCalled {
 cl::Program buildProgramFromSource(
     const std::string & source,
     const cl::Context & context,
-    const cl::Device & device
+    const cl::Device & device,
+    const char * options = nullptr
     )
 {
     cl::Program program{context, source};
 
     try {
-        program.build({device});
+        program.build({device}, options);
     }
     catch (cl::Error&) {
         std::string build_log;
@@ -92,7 +93,8 @@ cl::Program buildProgramFromSource(
 cl::Program buildProgramFromSourceFile(
     const std::string & source_file,
     const cl::Context & context,
-    const cl::Device & device
+    const cl::Device & device,
+    const char * options = nullptr
     )
 {
     std::string source;
@@ -106,7 +108,7 @@ cl::Program buildProgramFromSourceFile(
     source.assign(std::istreambuf_iterator<char>(filestream),
                     std::istreambuf_iterator<char>());
 
-    return buildProgramFromSource(source, context, device);
+    return buildProgramFromSource(source, context, device, options);
 }
 
 const std::map<cl_int, const char *> error_codes =
@@ -239,12 +241,18 @@ public:
     // Given a string and a kernel name, try to compile the string as OpenCL
     // code and extract a kernel with the given name. Throw an error if the
     // OpenCL code cannot be compiled or no kernel with the given name is
-    // contained in the OpenCL code.
+    // contained in the OpenCL code. It is possible to pass options to the
+    // OpenCL compiler for example to define a symbolic variable COUNT to 50
+    // one can pass "-DCOUNT=50"
     //
-    cl::Kernel build_kernel(const std::string & source, const char * name)
+    cl::Kernel build_kernel(
+        const std::string & source, 
+        const char * name,
+        const char * options = nullptr
+        )
     {
         cl::Program program =
-            jc::detail::buildProgramFromSource(source, context_, device_);
+            jc::detail::buildProgramFromSource(source, context_, device_, options);
         return cl::Kernel{program, name};
     }
 
@@ -255,15 +263,18 @@ public:
     // file, compile the OpenCL code it contains and extract a kernel
     // with the given name. Throw an error if the file cannot be opened,
     // the OpenCL code cannot be compiled or no kernel with the given name
-    // is contained in the OpenCL code.
+    // is contained in the OpenCL code. It is possible to pass options to the
+    // OpenCL compiler for example to define a symbolic variable COUNT to 50
+    // one can pass "-DCOUNT=50"
     //
     cl::Kernel build_kernel_from_file(
         const std::string & file,
-        const char * name
+        const char * name,
+        const char * options = nullptr
         )
     {
         cl::Program program =
-            jc::detail::buildProgramFromSourceFile(file, context_, device_);
+            jc::detail::buildProgramFromSourceFile(file, context_, device_, options);
         return cl::Kernel{program, name};
     }
 
